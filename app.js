@@ -27,7 +27,14 @@ const app = express();
 const corsOptions = {
   origin: ['http://localhost:7000'],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-chain-id',
+    'X-Chain-Id',
+    'x-user-address',
+    'X-User-Address' 
+  ],
   credentials: true,
   maxAge: 86400
 };

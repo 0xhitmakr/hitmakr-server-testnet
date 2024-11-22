@@ -5,6 +5,9 @@ import fs from 'fs';
 import { Readable } from 'stream';
 import dotenv from 'dotenv';
 import { uploadFile } from './filebaseService.js';
+import ffmpeg from 'fluent-ffmpeg';
+import { v4 as uuidv4 } from 'uuid';
+import { promisify } from 'util';
 
 dotenv.config();
 
@@ -30,7 +33,44 @@ function getContentType(fileExtension) {
   }
 }
 
-async function uploadChunk(chunk, index, contentType, totalChunks, fileName) {
+async function validateAndFixAudio(inputPath) {
+  const tempDir = path.join(process.cwd(), 'temp');
+  
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
+  }
+
+  const outputPath = path.join(tempDir, `${uuidv4()}.mp3`);
+
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(inputPath, (err, metadata) => {
+      if (err) {
+        return reject(new Error(`FFprobe error: ${err.message}`));
+      }
+
+      const command = ffmpeg(inputPath)
+        .outputOptions([
+          '-c:a libmp3lame',
+          '-q:a 2',
+          '-ar 44100',
+          '-ac 2',
+          '-b:a 192k',
+          '-map_metadata 0:s:0',
+          '-id3v2_version 3'
+        ])
+        .on('end', () => resolve(outputPath))
+        .on('error', (err, stdout, stderr) => reject(new Error(`FFmpeg conversion error: ${err.message}`)));
+
+      if (metadata.streams[0] && metadata.streams[0].codec_name === 'aac') {
+        command.inputOptions(['-acodec aac']);
+      }
+
+      command.save(outputPath);
+    });
+  });
+}
+
+async function uploadChunk(chunk, index, contentType, totalChunks, fileName, retries = 3) {
   const irys = await getIrysUploader();
   const tags = [
     { name: 'Content-Type', value: contentType },
@@ -40,63 +80,64 @@ async function uploadChunk(chunk, index, contentType, totalChunks, fileName) {
     { name: 'Accept-Ranges', value: 'bytes' },
   ];
 
-  try {
-    const response = await irys.upload(chunk, { tags });
-    console.log(`Chunk ${index + 1}/${totalChunks} uploaded ==> https://gateway.irys.xyz/${response.id}`);
-    return { id: response.id, index: index };
-  } catch (e) {
-    console.error(`Error uploading chunk ${index + 1}/${totalChunks}:`, e);
-    throw e;
+  let lastError;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await irys.upload(chunk, { tags });
+      return { id: response.id, index: index };
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+      }
+    }
   }
+  throw lastError;
 }
 
 export async function uploadMusic(filePath) {
-  const fileName = path.basename(filePath);
-  const fileExtension = path.extname(filePath);
-  const fileSize = fs.statSync(filePath).size;
-  const fileStream = fs.createReadStream(filePath);
-  const contentType = getContentType(fileExtension);
-  const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-  const uploadPromises = [];
-
-  let chunkIndex = 0;
-  let buffer = Buffer.alloc(0);
-
-  const processChunk = () => {
-    return new Promise((resolve, reject) => {
-      fileStream.on('data', (chunk) => {
-        buffer = Buffer.concat([buffer, chunk]);
-
-        while (buffer.length >= CHUNK_SIZE) {
-          const chunkToUpload = buffer.slice(0, CHUNK_SIZE);
-          buffer = buffer.slice(CHUNK_SIZE);
-
-          const chunkStream = Readable.from(chunkToUpload);
-          uploadPromises.push(uploadChunk(chunkStream, chunkIndex, contentType, totalChunks, fileName));
-          chunkIndex++;
-        }
-      });
-
-      fileStream.on('end', () => {
-        if (buffer.length > 0) {
-          const chunkStream = Readable.from(buffer);
-          uploadPromises.push(uploadChunk(chunkStream, chunkIndex, contentType, totalChunks, fileName));
-        }
-        resolve();
-      });
-
-      fileStream.on('error', (error) => {
-        reject(error);
-      });
-    });
-  };
-
   try {
+    const validatedFilePath = await validateAndFixAudio(filePath);
+    const fileName = path.basename(validatedFilePath);
+    const fileExtension = path.extname(validatedFilePath);
+    const fileSize = fs.statSync(validatedFilePath).size;
+    const fileStream = fs.createReadStream(validatedFilePath);
+    const contentType = getContentType(fileExtension);
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    const uploadPromises = [];
+    let chunkIndex = 0;
+    let buffer = Buffer.alloc(0);
+
+    const processChunk = () => {
+      return new Promise((resolve, reject) => {
+        fileStream.on('data', (chunk) => {
+          buffer = Buffer.concat([buffer, chunk]);
+          while (buffer.length >= CHUNK_SIZE) {
+            const chunkToUpload = buffer.slice(0, CHUNK_SIZE);
+            buffer = buffer.slice(CHUNK_SIZE);
+            const chunkStream = Readable.from(chunkToUpload);
+            uploadPromises.push(uploadChunk(chunkStream, chunkIndex, contentType, totalChunks, fileName));
+            chunkIndex++;
+          }
+        });
+
+        fileStream.on('end', () => {
+          if (buffer.length > 0) {
+            const chunkStream = Readable.from(buffer);
+            uploadPromises.push(uploadChunk(chunkStream, chunkIndex, contentType, totalChunks, fileName));
+          }
+          resolve();
+        });
+
+        fileStream.on('error', reject);
+      });
+    };
+
     await processChunk();
     const chunkResults = await Promise.all(uploadPromises);
-    return chunkResults.sort((a, b) => a.index - b.index).map((result) => result.id);
+    await promisify(fs.unlink)(validatedFilePath).catch(console.error);
+    return chunkResults.sort((a, b) => a.index - b.index).map(result => result.id);
   } catch (error) {
-    console.error('Error during file upload:', error);
     throw error;
   }
 }
@@ -110,17 +151,14 @@ export async function uploadCoverImage(fileObject) {
     ];
 
     const fileStream = Readable.from(fileObject.buffer);
-
     const response = await irys.upload(fileStream, { tags });
     return `https://gateway.irys.xyz/${response.id}`;
   } catch (error) {
-    console.error('Error uploading cover image to Irys:', error);
     throw new Error('Failed to upload cover image to Irys');
   }
 }
 
 async function uploadLyricsToIrys(lyricsText) {
-  console.log('Uploading lyrics to Irys...');
   try {
     const irys = await getIrysUploader();
     const tags = [
@@ -129,51 +167,42 @@ async function uploadLyricsToIrys(lyricsText) {
     ];
 
     const lyricsBase64 = Buffer.from(lyricsText).toString('base64');
-
     const response = await irys.upload(Buffer.from(lyricsBase64), { tags });
     return `https://gateway.irys.xyz/${response.id}`;
-  } catch (uploadError) {
-    console.error('Error uploading lyrics to Irys:', uploadError);
+  } catch (error) {
     throw new Error('Failed to upload lyrics file to Irys');
   }
 }
 
 export async function uploadMetadata(metadata) {
   try {
-      const jsonString = JSON.stringify(metadata);
-      const sizeInBytes = Buffer.byteLength(jsonString, 'utf8');
-      const SIZE_THRESHOLD = 100 * 1024; // 100KB in bytes
+    const jsonString = JSON.stringify(metadata);
+    const sizeInBytes = Buffer.byteLength(jsonString, 'utf8');
+    const SIZE_THRESHOLD = 100 * 1024;
       
-      if (sizeInBytes <= SIZE_THRESHOLD) {
-          // Use Irys for smaller files
-          console.log('Using Irys for metadata upload (size <= 100KB)');
-          const irys = await getIrysUploader();
-          const tags = [
-              { name: 'Content-Type', value: 'application/json' },
-              { name: 'Type', value: 'metadata' }
-          ];
+    if (sizeInBytes <= SIZE_THRESHOLD) {
+      const irys = await getIrysUploader();
+      const tags = [
+        { name: 'Content-Type', value: 'application/json' },
+        { name: 'Type', value: 'metadata' }
+      ];
 
-          const response = await irys.upload(Buffer.from(jsonString), { tags });
-          return `https://gateway.irys.xyz/${response.id}`;
-      } else {
-          // Use Filebase for larger files
-          console.log('Using Filebase for metadata upload (size > 100KB)');
-          const fileName = `metadata-${Date.now()}.json`;
-          const tempFilePath = `/tmp/${fileName}`;
-          
-          // Write metadata to temporary file
-          fs.writeFileSync(tempFilePath, jsonString);
-          
-          const fileObject = {
-              originalname: fileName,
-              path: tempFilePath
-          };
-          
-          return await uploadFile(fileObject);
-      }
+      const response = await irys.upload(Buffer.from(jsonString), { tags });
+      return `https://gateway.irys.xyz/${response.id}`;
+    } else {
+      const fileName = `metadata-${Date.now()}.json`;
+      const tempFilePath = `/tmp/${fileName}`;
+      fs.writeFileSync(tempFilePath, jsonString);
+      
+      const fileObject = {
+        originalname: fileName,
+        path: tempFilePath
+      };
+      
+      return await uploadFile(fileObject);
+    }
   } catch (error) {
-      console.error('Error uploading metadata:', error);
-      throw new Error(`Failed to upload metadata: ${error.message}`);
+    throw new Error(`Failed to upload metadata: ${error.message}`);
   }
 }
 

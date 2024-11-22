@@ -1,16 +1,11 @@
 import express from 'express';
+const router = express.Router();
 import multer from 'multer';
 import { verifyToken } from '../middleware/authMiddleware.js';
 import { checkCopyright } from '../controllers/copyrightController.js';
 
-const router = express.Router();
-const upload = multer({ 
-    dest: 'uploads/',
-    limits: {
-      fileSize: 100 * 1024 * 1024
-    }
-}); 
+const upload = multer({ dest: 'uploads/' });
 
-router.post('/copyright-check', verifyToken, upload.single('song'), checkCopyright); 
+router.post('/copyright-check', verifyToken, upload.single('song'), checkCopyright);
 
 export default router;

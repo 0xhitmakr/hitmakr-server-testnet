@@ -5,7 +5,7 @@ import {
     isAddress,
     toUtf8String
 } from 'ethers';
-import abi from './abi/abi.json' assert { type: 'json' };
+import abi from './abi/abi.json' with { type: 'json' };
 import { createVerifierManager } from '../../../middleware/VerifierManager.js';
 import dotenv from 'dotenv';
 

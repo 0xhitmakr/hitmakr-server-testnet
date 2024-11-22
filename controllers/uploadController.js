@@ -7,6 +7,8 @@ import fs from 'fs';
 import { processAndStoreFingerprint } from '../services/fingerprintService.js'; 
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import { v4 as uuidv4 } from 'uuid';
+import { promisify } from 'util';
 
 dotenv.config();
 
@@ -17,14 +19,10 @@ const validateChain = (chain) => {
         return { success: false, message: "Chain identifier is required" };
     }
     if (!CHAIN_FORMAT_REGEX.test(chain)) {
-        return { 
-            success: false, 
-            message: "Chain identifier must be 2-10 uppercase characters or numbers" 
-        };
+        return { success: false, message: "Chain identifier must be 2-10 uppercase characters or numbers" };
     }
     return { success: true };
 };
-
 
 const generateUploadHash = (songId, userAddress) => {
     const secret = process.env.UPLOAD_HASH_SECRET;
@@ -34,9 +32,38 @@ const generateUploadHash = (songId, userAddress) => {
         .digest('hex');
 };
 
+const ensureTempDirectory = () => {
+    const tempDir = path.join(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+    }
+    return tempDir;
+};
+
+const cleanupTempFiles = async (files) => {
+    const tempDir = path.join(process.cwd(), 'temp');
+    try {
+        for (const file of files) {
+            if (file && fs.existsSync(file)) {
+                await promisify(fs.unlink)(file);
+            }
+        }
+        
+        if (fs.existsSync(tempDir)) {
+            const tempFiles = await promisify(fs.readdir)(tempDir);
+            for (const file of tempFiles) {
+                await promisify(fs.unlink)(path.join(tempDir, file));
+            }
+        }
+    } catch (error) {
+        console.error('Error cleaning up temp files:', error);
+    }
+};
+
 export async function newUpload(req, res) {
     let songFile, coverImage;
     let songFilePath, coverImagePath;
+    const tempDir = ensureTempDirectory();
 
     try {
         songFile = req.files['song'] ? req.files['song'][0] : null;
@@ -46,8 +73,9 @@ export async function newUpload(req, res) {
             throw new Error('No song file uploaded');
         }
 
-        songFilePath = path.join(path.dirname(songFile.path), songFile.originalname);
-        fs.renameSync(songFile.path, songFilePath);
+        const tempFilePath = path.join(tempDir, `${uuidv4()}_${songFile.originalname}`);
+        await promisify(fs.copyFile)(songFile.path, tempFilePath);
+        songFilePath = tempFilePath;
 
         const songId = Date.now().toString();
         const userAddress = req.headers['x-user-address'];
@@ -154,9 +182,13 @@ export async function newUpload(req, res) {
             message: error.message
         });
     } finally {
-        safeDeleteFile(songFilePath);
-        safeDeleteFile(coverImagePath);
-        if (songFile) safeDeleteFile(songFile.path);
-        if (coverImage) safeDeleteFile(coverImage.path);
+        const filesToClean = [
+            songFilePath,
+            coverImagePath,
+            songFile?.path,
+            coverImage?.path
+        ].filter(Boolean);
+        
+        await cleanupTempFiles(filesToClean);
     }
 }

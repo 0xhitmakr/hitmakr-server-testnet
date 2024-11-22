@@ -2,11 +2,18 @@ import { recognizeSong, checkSongExistence } from '../services/shazamService.js'
 import { generateFingerprint, checkForSimilarSong } from '../services/fingerprintService.js';
 import { safeDeleteFile, calculateAudioDuration } from '../utils/fileUtils.js';
 
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
 export async function checkCopyright(req, res) {
   let filePath;
   try {
     if (!req.file) {
       return res.status(400).json({ message: 'No song file uploaded.' });
+    }
+
+    if (req.file && req.file.size > MAX_FILE_SIZE) {
+      safeDeleteFile(req.file.path);
+      return res.status(413).json({ message: 'File size exceeds the limit of 100MB.' });
     }
 
     filePath = req.file.path;

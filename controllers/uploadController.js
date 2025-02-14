@@ -15,12 +15,8 @@ dotenv.config();
 const CHAIN_FORMAT_REGEX = /^[A-Z0-9]{2,10}$/;
 
 const validateChain = (chain) => {
-    if (!chain) {
-        return { success: false, message: "Chain identifier is required" };
-    }
-    if (!CHAIN_FORMAT_REGEX.test(chain)) {
-        return { success: false, message: "Chain identifier must be 2-10 uppercase characters or numbers" };
-    }
+    if (!chain) return { success: false, message: "Chain identifier is required" };
+    if (!CHAIN_FORMAT_REGEX.test(chain)) return { success: false, message: "Chain identifier must be 2-10 uppercase characters or numbers" };
     return { success: true };
 };
 
@@ -34,9 +30,7 @@ const generateUploadHash = (songId, userAddress) => {
 
 const ensureTempDirectory = () => {
     const tempDir = path.join(process.cwd(), 'temp');
-    if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-    }
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     return tempDir;
 };
 
@@ -44,9 +38,7 @@ const cleanupTempFiles = async (files) => {
     const tempDir = path.join(process.cwd(), 'temp');
     try {
         for (const file of files) {
-            if (file && fs.existsSync(file)) {
-                await promisify(fs.unlink)(file);
-            }
+            if (file && fs.existsSync(file)) await promisify(fs.unlink)(file);
         }
         
         if (fs.existsSync(tempDir)) {
@@ -69,9 +61,7 @@ export async function newUpload(req, res) {
         songFile = req.files['song'] ? req.files['song'][0] : null;
         coverImage = req.files['coverImage'] ? req.files['coverImage'][0] : null;
 
-        if (!songFile) {
-            throw new Error('No song file uploaded');
-        }
+        if (!songFile) throw new Error('No song file uploaded');
 
         const tempFilePath = path.join(tempDir, `${uuidv4()}_${songFile.originalname}`);
         await promisify(fs.copyFile)(songFile.path, tempFilePath);
@@ -81,16 +71,13 @@ export async function newUpload(req, res) {
         const userAddress = req.headers['x-user-address'];
         const uploadHash = generateUploadHash(songId, userAddress);
 
-        const fingerprintData = {
-            songId: songId,
+        const fingerprintResult = await processAndStoreFingerprint({
+            songId,
             filePath: songFilePath,
             walletAddress: userAddress
-        };
+        });
 
-        const fingerprintResult = await processAndStoreFingerprint(fingerprintData);
-        if (!fingerprintResult.success) {
-            throw new Error(fingerprintResult.message);
-        }
+        if (!fingerprintResult.success) throw new Error(fingerprintResult.message);
 
         const chunkIds = await uploadMusic(songFilePath);
         const durationInSeconds = await calculateAudioDuration(songFilePath);
@@ -104,7 +91,11 @@ export async function newUpload(req, res) {
         const songDetails = JSON.parse(req.body.songDetails);
         const selectedCategory = req.body.selectedCategory;
         const royaltySplits = JSON.parse(req.body.royaltySplits);
-        const mintPrice = parseFloat(req.body.mintPrice);
+        const editions = JSON.parse(req.body.editions);
+        const selectedChain = req.body.selectedChain || "SKL";
+
+        const chainValidation = validateChain(selectedChain);
+        if (!chainValidation.success) throw new Error(chainValidation.message);
 
         const processedRoyaltySplits = royaltySplits.map((split) => ({
             address: split.address.toLowerCase(),
@@ -112,17 +103,11 @@ export async function newUpload(req, res) {
             percentage: parseFloat(split.percentage)
         }));
 
-        let selectedChain = req.body.selectedChain || "SKL";
-        const chainValidation = validateChain(selectedChain);
-        if (!chainValidation.success) {
-            throw new Error(chainValidation.message);
-        }
-
         const metadata = {
             name: songDetails.title,
             description: songDetails.description,
             image: coverImageUrl,
-            songId: songId,
+            songId,
             creator: userAddress.toLowerCase(),
             format: 'audio/mpeg',
             type: 'single',
@@ -136,10 +121,19 @@ export async function newUpload(req, res) {
                 { trait_type: 'License', value: songDetails.license },
                 { trait_type: 'Country', value: songDetails.country },
                 { trait_type: 'Chain', value: selectedChain },
-                { trait_type: 'Price', value: mintPrice },
                 { trait_type: 'Royalty Splits', value: processedRoyaltySplits },
                 { trait_type: 'Is Gated', value: JSON.parse(req.body.subscribersUpload || "false") },
-                { trait_type: 'Is Copyright Overwritten', value: JSON.parse(req.body.copyrightChecked || "false") }
+                { trait_type: 'Is Copyright Overwritten', value: JSON.parse(req.body.copyrightChecked || "false") },
+                { trait_type: 'Editions', value: {
+                    collectors: {
+                        enabled: editions.collectors.enabled,
+                        price: editions.collectors.price
+                    },
+                    licensing: {
+                        enabled: editions.licensing.enabled,
+                        price: editions.licensing.price
+                    }
+                }}
             ]
         };
 
@@ -163,6 +157,8 @@ export async function newUpload(req, res) {
             title: songDetails.title,
             description: songDetails.description,
             selectedChain,
+            tokenURI,
+            editions,
             metadata
         };
 
@@ -182,13 +178,6 @@ export async function newUpload(req, res) {
             message: error.message
         });
     } finally {
-        const filesToClean = [
-            songFilePath,
-            coverImagePath,
-            songFile?.path,
-            coverImage?.path
-        ].filter(Boolean);
-        
-        await cleanupTempFiles(filesToClean);
+        await cleanupTempFiles([songFilePath, coverImagePath, songFile?.path, coverImage?.path].filter(Boolean));
     }
 }

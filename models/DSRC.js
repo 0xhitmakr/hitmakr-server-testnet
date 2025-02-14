@@ -24,7 +24,11 @@ const dsrcSchema = new mongoose.Schema({
         type: String,
         required: true
     },
-    price: {
+    collectorsPrice: {
+        type: String,
+        required: true
+    },
+    licensingPrice: {
         type: String,
         required: true
     },

@@ -1,11 +1,9 @@
 {
-  "name": "hitmakr-server-testnet",
-  "version": "1.0.0",
-  "description": "HitMakr Server - Music Analysis and Processing API",
+  "name": "hitmakr-server",
   "module": "index.js",
   "type": "module",
-  "engines": {
-    "bun": ">=1.0.0"
+  "devDependencies": {
+    "@types/bun": "latest"
   },
   "scripts": {
     "start": "bun run index.js",
@@ -38,16 +36,14 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "node-shazam": "^1.2.7",
+    "nodemon": "^3.1.9",
     "path": "^0.12.7",
     "pino": "^8.0.0",
     "pino-pretty": "^10.0.0",
     "util": "^0.12.5",
     "uuid": "^11.0.3"
   },
-  "devDependencies": {
-    "@types/bun": "latest",
-    "eslint": "^8.0.0",
-    "eslint-config-airbnb-base": "^15.0.0",
-    "prettier": "^3.0.0"
+  "peerDependencies": {
+    "typescript": "^5.0.0"
   }
 }

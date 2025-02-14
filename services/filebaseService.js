@@ -20,13 +20,23 @@ const filebase = new ObjectManager(FILEBASE_KEY, FILEBASE_SECRET, {
 });
 
 export async function uploadFile(fileObject) {
+  if (!fileObject || !fileObject.originalname || !fileObject.path) {
+    throw new Error('Invalid file object provided');
+  }
+
+  let filePath = fileObject.path;
   try {
     const fileName = fileObject.originalname;
-    const filePath = fileObject.path;
-
     console.log(`Attempting to upload file: ${fileName}`);
 
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found at path: ${filePath}`);
+    }
+
     const fileContent = fs.readFileSync(filePath);
+    if (!fileContent || fileContent.length === 0) {
+      throw new Error('File content is empty');
+    }
 
     const hash = crypto.createHash('sha256');
     hash.update(fileContent);
@@ -41,25 +51,45 @@ export async function uploadFile(fileObject) {
     const uploadResponse = await filebase.upload(fileName, fileContent);
     console.log('Filebase upload response:', uploadResponse);
 
+    if (!uploadResponse) {
+      throw new Error('No response received from Filebase');
+    }
+    if (!uploadResponse.cid) {
+      throw new Error('Upload successful but no CID returned from Filebase');
+    }
+
     const cid = uploadResponse.cid;
     console.log('Uploaded file CID:', cid);
 
     const ipfsUrl = `https://ipfs.filebase.io/ipfs/${cid}`;
 
-    await Image.create({
+    const newImage = await Image.create({
       sha256Hash,
       ipfsHash: cid,
       url: ipfsUrl,
-      timestamp: new Date(),
+      timestamp: new Date()
     });
+
+    if (!newImage) {
+      throw new Error('Failed to create database entry');
+    }
 
     console.log(`File uploaded successfully. IPFS URL: ${ipfsUrl}`);
     return ipfsUrl;
+
   } catch (error) {
     console.error('Detailed error in uploadFile:', error);
     throw new Error(`Failed to upload file to Filebase: ${error.message}`);
-  }finally{
-    fs.unlinkSync(fileObject.path);
+  } finally {
+    // Clean up temporary file
+    if (filePath && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`Temporary file cleaned up: ${filePath}`);
+      } catch (unlinkError) {
+        console.error(`Failed to clean up temporary file: ${unlinkError.message}`);
+      }
+    }
   }
 }
 

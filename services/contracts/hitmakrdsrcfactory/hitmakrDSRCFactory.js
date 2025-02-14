@@ -1,35 +1,38 @@
-import { 
-    Contract, 
+import {
+    Contract,
     JsonRpcProvider,
     getAddress,
     isAddress,
-    toUtf8String
+    Interface,
 } from 'ethers';
 import abi from './abi/abi.json' with { type: 'json' };
-import { createVerifierManager } from '../../../middleware/VerifierManager.js';
+import controlCenterAbi from "../controlcenter/abi/controlcenterabi.json" with { type: 'json' };
+import creativeIDAbi from "../creativeId/abi/creativeidabi.json" with { type: 'json' };
 import dotenv from 'dotenv';
+import { createVerifierManager } from '../../../middleware/VerifierManager.js';
 
 dotenv.config();
 
-
 const RPC_URL = process.env.SKALE_RPC_URL;
-const CONTRACT_ADDRESS = process.env.SKALE_HITMAKR_DSRC_FACTORY;
-const DEFAULT_GAS_LIMIT = BigInt(41443050);
+const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_HITMAKR_DSRC_FACTORY_SKL;
+const CONTROL_CENTER_ADDRESS = process.env.CONTROL_CENTER_ADDRESS;
+const VERIFIER_PRIVATE_KEYS = process.env.NEW_VERIFIER_PRIVATE_KEYS?.split(',').map(k => k.trim()); // Use NEW_VERIFIER_PRIVATE_KEYS
+const DEFAULT_GAS_LIMIT = BigInt(10000000);
 const CACHE_TTL = 5 * 60 * 1000;
-
+const MAX_URI_LENGTH = 1000;
+const MAX_RECIPIENTS = 10;
+const BASIS_POINTS = 10000;
 
 const provider = new JsonRpcProvider(RPC_URL);
 const readContract = new Contract(CONTRACT_ADDRESS, abi, provider);
-
-
 const dsrcCache = new Map();
+const contractInterface = new Interface(abi);
 
-
+// Initialize VerifierManager
 const verifierManager = await createVerifierManager({
     rpcUrl: RPC_URL,
-    verifierKeys: process.env.NEW_VERIFIER_PRIVATE_KEYS.split(',').map(k => k.trim())
+    verifierKeys: VERIFIER_PRIVATE_KEYS, // Pass the array of keys
 });
-
 
 const validateAddress = (address) => {
     if (!address || !isAddress(address)) {
@@ -38,97 +41,164 @@ const validateAddress = (address) => {
     return getAddress(address);
 };
 
-const formatBigIntParams = (params) => {
-    try {
-        return {
-            tokenURI: params.tokenURI,
-            price: BigInt(params.price),
-            recipients: params.recipients.map(validateAddress),
-            percentages: params.percentages.map(p => BigInt(p)),
-            nonce: BigInt(params.nonce),
-            deadline: BigInt(params.deadline),
-            selectedChain: params.selectedChain
-        };
-    } catch (err) {
-        throw new Error(`Parameter formatting failed: ${err.message}`);
-    }
+const handleError = (context, err) => {
+    console.error(`${context}:`, err);
+    return {
+        success: false,
+        error: err.message
+    };
 };
 
 export const verifierCreateDSRC = async (dsrcData) => {
     console.log('=== DSRC Creation Started ===');
-    
+
     try {
-        const validation = validateDSRCParams(dsrcData);
-        if (!validation.isValid) {
-            return {
-                success: false,
-                error: 'Validation failed',
-                errors: validation.errors
-            };
+        const { tokenURI, collectorsPrice, licensingPrice, recipients, percentages, selectedChain } = dsrcData;
+        const formattedRecipients = recipients.map(addr => validateAddress(addr));
+
+        // Validate inputs before sending
+        if (!tokenURI || tokenURI.length === 0) {
+            throw new Error('Invalid tokenURI');
+        }
+        if (!formattedRecipients || formattedRecipients.length === 0) {
+            throw new Error('Invalid recipients');
+        }
+        if (!percentages || percentages.length === 0) {
+            throw new Error('Invalid percentages');
+        }
+        if (!selectedChain || selectedChain.length === 0) {
+            throw new Error('Invalid chain');
         }
 
-        const formattedParams = formatBigIntParams(dsrcData);
-
+        // Execute transaction using VerifierManager
         return await verifierManager.executeTransaction(async (wallet) => {
             const contract = new Contract(CONTRACT_ADDRESS, abi, wallet);
+            const controlCenter = new Contract(CONTROL_CENTER_ADDRESS, controlCenterAbi, provider);
 
-            console.log('Transaction Parameters:', {
-                ...formattedParams,
-                price: formattedParams.price.toString(),
-                percentages: formattedParams.percentages.map(p => p.toString()),
-                nonce: formattedParams.nonce.toString(),
-                deadline: formattedParams.deadline.toString()
+            const verifierRole = await controlCenter.VERIFIER_ROLE();
+            const hasRole = await controlCenter.hasRole(verifierRole, wallet.address); // Use wallet from VerifierManager
+
+            console.log('Verifier role check:', {
+                address: wallet.address, // Use wallet from VerifierManager
+                verifierRole,
+                hasRole
             });
 
-            let gasLimit = DEFAULT_GAS_LIMIT;
-            try {
-                const gasEstimate = await contract.createDSRC.estimateGas(
-                    formattedParams,
-                    dsrcData.signature
-                );
-                gasLimit = BigInt(Math.floor(Number(gasEstimate) * 1.2));
-                console.log('Estimated Gas:', gasLimit.toString());
-            } catch (gasError) {
-                console.warn('Gas estimation failed, using default:', gasError.message);
-                if (gasError.data) {
-                    try {
-                        const reason = toUtf8String('0x' + gasError.data.slice(138));
-                        console.log('Revert Reason:', reason);
-                    } catch (e) {
-                        console.warn('Could not parse revert reason');
-                    }
-                }
+            if (!hasRole) {
+                throw new Error('Verifier does not have required role');
             }
 
+
+            console.log('Calling createDSRC with parameters:', {
+                tokenURI,
+                collectorsPrice: BigInt(collectorsPrice).toString(),
+                licensingPrice: BigInt(licensingPrice).toString(),
+                recipients: formattedRecipients,
+                percentages,
+                selectedChain
+            });
+
+            // Try to simulate the transaction first
+            try {
+                await contract.createDSRC.staticCall(
+                    tokenURI,
+                    BigInt(collectorsPrice),
+                    BigInt(licensingPrice),
+                    formattedRecipients,
+                    percentages,
+                    selectedChain,
+                    { gasLimit: DEFAULT_GAS_LIMIT }
+                );
+            } catch (error) {
+                console.log('Simulation failed:', {
+                    error: error.message,
+                    data: error.data,
+                    revertData: error.revertData,
+                    reason: error.reason
+                });
+                if (error.data) {
+                    try {
+                        const decodedError = contractInterface.parseError(error.data);
+                        console.log('Decoded error:', decodedError);
+                        throw new Error(`Contract reverted: ${decodedError.name}`);
+                    } catch (e) {
+                        // If we can't decode the error, throw the original
+                        throw error;
+                    }
+                }
+                throw error;
+            }
+
+            console.log('Transaction simulation successful, sending transaction...');
             const tx = await contract.createDSRC(
-                formattedParams,
-                dsrcData.signature,
-                { gasLimit }
+                tokenURI,
+                BigInt(collectorsPrice),
+                BigInt(licensingPrice),
+                formattedRecipients,
+                percentages,
+                selectedChain,
+                { gasLimit: DEFAULT_GAS_LIMIT }
             );
 
             console.log('Transaction Sent:', tx.hash);
+            console.log('Transaction data:', tx.data);
 
             const receipt = await tx.wait();
-            
+
+            console.log('Transaction receipt:', {
+                status: receipt.status,
+                gasUsed: receipt.gasUsed.toString(),
+                blockNumber: receipt.blockNumber,
+                effectiveGasPrice: receipt.effectiveGasPrice?.toString(),
+                from: receipt.from,
+                to: receipt.to,
+                contractAddress: receipt.contractAddress,
+                type: receipt.type,
+                logs: receipt.logs.map(log => {
+                    try {
+                        const decoded = contractInterface.parseLog({
+                            topics: [...log.topics],
+                            data: log.data
+                        });
+                        return {
+                            name: decoded.name,
+                            args: decoded.args,
+                            raw: {
+                                topics: log.topics,
+                                data: log.data
+                            }
+                        };
+                    } catch (e) {
+                        return {
+                            error: 'Could not decode log',
+                            raw: {
+                                topics: log.topics,
+                                data: log.data
+                            }
+                        };
+                    }
+                })
+            });
+
             if (!receipt.status) {
                 throw new Error('Transaction failed');
             }
 
-            const dsrcCreatedEvent = receipt.logs
-                .map(log => {
-                    try {
-                        return contract.interface.parseLog({
-                            topics: log.topics,
-                            data: log.data
-                        });
-                    } catch {
-                        return null;
-                    }
-                })
-                .find(event => event?.name === 'DSRCCreated');
+            const dsrcCreatedEvent = receipt.logs.find(log => {
+                try {
+                    const event = contractInterface.parseLog({ topics: [...log.topics], data: log.data });
+                    return event.name === 'DSRCCreated';
+                } catch(e) {
+                    return false;
+                }
+            });
 
             if (!dsrcCreatedEvent) {
-                throw new Error('DSRCCreated event not found in receipt');
+                return {
+                    success: false,
+                    error: 'DSRCCreated event not found',
+                    transactionHash: tx.hash
+                };
             }
 
             dsrcCache.clear();
@@ -140,10 +210,10 @@ export const verifierCreateDSRC = async (dsrcData) => {
                 dsrcId: dsrcCreatedEvent.args.dsrcId,
                 receipt
             };
-        });
+        }); // End of verifierManager.executeTransaction
     } catch (err) {
-        console.error('=== DSRC Creation Error ===');
-        return handleTransactionError(err);
+        console.error('=== DSRC Creation Error ===', err);
+        return handleError('verifierCreateDSRC', err);
     }
 };
 
@@ -151,42 +221,32 @@ export const getNonce = async (userAddress) => {
     try {
         const address = validateAddress(userAddress);
         const cacheKey = `nonce_${address}`;
-        
         const cached = dsrcCache.get(cacheKey);
         if (cached?.timestamp > Date.now() - CACHE_TTL) {
             return { success: true, nonce: cached.nonce };
         }
-
-        const nonce = await readContract.getNonce(address);
-        
-        dsrcCache.set(cacheKey, {
-            nonce: nonce.toString(),
-            timestamp: Date.now()
-        });
-
-        return {
-            success: true,
-            nonce: nonce.toString()
-        };
+        const nonce = await readContract.yearCounts(address);
+        dsrcCache.set(cacheKey, { nonce: nonce.toString(), timestamp: Date.now() });
+        return { success: true, nonce: nonce.toString() };
     } catch (err) {
-        return handleError('Nonce fetch failed', err);
+        return handleError('getNonce', err);
     }
 };
 
-export const getCurrentYearCount = async (userAddress) => {
+export const getYearCount = async (userAddress) => {
     try {
         const address = validateAddress(userAddress);
         const cacheKey = `yearCount_${address}`;
-        
         const cached = dsrcCache.get(cacheKey);
         if (cached?.timestamp > Date.now() - CACHE_TTL) {
             return cached.data;
         }
 
-        const [year, count] = await readContract.getCurrentYearCount(address);
+        const currentYear = Math.floor((Date.now() / 31536000000) + 1970) % 100;
+        const count = await readContract.yearCounts(address, currentYear);
         const data = {
             success: true,
-            year: Number(year),
+            year: currentYear,
             count: Number(count)
         };
 
@@ -197,23 +257,22 @@ export const getCurrentYearCount = async (userAddress) => {
 
         return data;
     } catch (err) {
-        return handleError('Year count fetch failed', err);
+        return handleError('getYearCount', err);
     }
 };
 
 export const getDSRCByChain = async (chain, dsrcId) => {
     try {
         const cacheKey = `dsrc_${chain}_${dsrcId}`;
-        
         const cached = dsrcCache.get(cacheKey);
         if (cached?.timestamp > Date.now() - CACHE_TTL) {
             return cached.data;
         }
 
-        const address = await readContract.getDSRCByChain(chain, dsrcId);
+        const dsrcAddress = await readContract.getDSRCByChain(chain, dsrcId);
         const data = {
             success: true,
-            address
+            dsrcAddress: dsrcAddress
         };
 
         dsrcCache.set(cacheKey, {
@@ -223,96 +282,8 @@ export const getDSRCByChain = async (chain, dsrcId) => {
 
         return data;
     } catch (err) {
-        return handleError('DSRC fetch failed', err);
+        return handleError('getDSRCByChain', err);
     }
 };
 
-// Validation Functions
-export const validateDSRCParams = (dsrcData) => {
-    if (!dsrcData || typeof dsrcData !== 'object') {
-        return { isValid: false, errors: ['Invalid DSRC data'] };
-    }
-
-    const errors = [];
-    const requiredFields = [
-        'tokenURI',
-        'price',
-        'recipients',
-        'percentages',
-        'nonce',
-        'deadline',
-        'signature',
-        'selectedChain'
-    ];
-
-    requiredFields.forEach(field => {
-        if (!dsrcData[field]) errors.push(`Missing ${field}`);
-    });
-
-    if (errors.length > 0) {
-        return { isValid: false, errors };
-    }
-
-    if (!Array.isArray(dsrcData.recipients) || !Array.isArray(dsrcData.percentages)) {
-        errors.push('Recipients and percentages must be arrays');
-    }
-
-    if (dsrcData.recipients?.length !== dsrcData.percentages?.length) {
-        errors.push('Recipients and percentages must have same length');
-    }
-
-    const totalPercentage = dsrcData.percentages?.reduce((sum, p) => sum + Number(p), 0);
-    if (totalPercentage !== 10000) {
-        errors.push(`Total percentage must be 10000 (100%), got: ${totalPercentage}`);
-    }
-
-    if (Number(dsrcData.deadline) < Math.floor(Date.now() / 1000)) {
-        errors.push('Deadline has expired');
-    }
-
-    try {
-        dsrcData.recipients?.forEach(address => validateAddress(address));
-    } catch {
-        errors.push('Invalid recipient address format');
-    }
-
-    return {
-        isValid: errors.length === 0,
-        errors
-    };
-};
-
-const handleTransactionError = (err) => {
-    console.error('Transaction Error:', {
-        message: err.message,
-        code: err.code,
-        data: err.data,
-        transaction: err.transaction
-    });
-
-    if (err.code === 'CALL_EXCEPTION' || err.code === 'UNPREDICTABLE_GAS_LIMIT') {
-        return {
-            success: false,
-            error: 'Transaction execution failed',
-            details: {
-                message: err.message,
-                reason: err.reason || 'Unknown reason',
-                code: err.code
-            }
-        };
-    }
-
-    return {
-        success: false,
-        error: err.message,
-        details: JSON.stringify(err, Object.getOwnPropertyNames(err))
-    };
-};
-
-const handleError = (context, err) => {
-    console.error(`${context}:`, err);
-    return {
-        success: false,
-        error: err.message
-    };
-};
+export { MAX_URI_LENGTH, BASIS_POINTS, MAX_RECIPIENTS };

@@ -1,44 +1,50 @@
-import Comment from '../models/Comment.js';
-import Song from '../models/Song.js';
+import Comment from "../models/Comment.js";
+import Song from "../models/Song.js";
 
 export async function createComment(req, res) {
   try {
-    const userAddress = req.headers['x-user-address'];
+    const userAddress = req.headers["x-user-address"];
     const { dsrcId, content } = req.body;
 
     if (!userAddress || !dsrcId || !content) {
-      return res.status(400).json({ 
-        message: 'User address, DSRC ID, and comment content are required.' 
+      return res.status(400).json({
+        message: "User address, DSRC ID, and comment content are required.",
       });
     }
 
     const song = await Song.findOne({ dsrcId });
     if (!song) {
-      return res.status(404).json({ message: 'DSRC not found.' });
+      return res.status(404).json({ message: "DSRC not found." });
     }
 
-    const newComment = await Comment.createComment(userAddress, dsrcId, song.uploadHash, content);
-    
+    const newComment = await Comment.createComment(
+      userAddress,
+      dsrcId,
+      song.uploadHash,
+      content
+    );
+
     const counts = await Comment.getDSRCCommentCount(dsrcId);
 
     res.status(201).json({
-      message: 'Comment created successfully.',
+      message: "Comment created successfully.",
       comment: {
         userAddress: newComment.userAddress,
         content: newComment.content,
-        createdAt: newComment.createdAt
+        createdAt: newComment.createdAt,
       },
-      counts
+      counts,
     });
   } catch (error) {
-    console.error('Error creating comment:', error);
-    if (error.message.includes('maximum length')) {
+    console.error("Error creating comment:", error);
+    if (error.message.includes("maximum length")) {
       return res.status(400).json({ message: error.message });
     }
-    return res.status(500).json({ message: 'Error creating comment. Please try again.' });
+    return res
+      .status(500)
+      .json({ message: "Error creating comment. Please try again." });
   }
 }
-
 
 export async function getDSRCComments(req, res) {
   try {
@@ -47,14 +53,14 @@ export async function getDSRCComments(req, res) {
     const limit = parseInt(req.query.limit) || 20;
 
     if (!dsrcId) {
-      return res.status(400).json({ 
-        message: 'DSRC ID is required.' 
+      return res.status(400).json({
+        message: "DSRC ID is required.",
       });
     }
 
     const songExists = await Song.exists({ dsrcId });
     if (!songExists) {
-      return res.status(404).json({ message: 'DSRC not found.' });
+      return res.status(404).json({ message: "DSRC not found." });
     }
 
     const commentsData = await Comment.getDSRCComments(dsrcId, page, limit);
@@ -67,15 +73,14 @@ export async function getDSRCComments(req, res) {
         totalComments: commentsData.totalComments,
         itemsPerPage: commentsData.limit,
         hasNextPage: commentsData.page < commentsData.totalPages,
-        hasPrevPage: commentsData.page > 1
-      }
+        hasPrevPage: commentsData.page > 1,
+      },
     });
   } catch (error) {
-    console.error('Error fetching DSRC comments:', error);
-    res.status(500).json({ message: 'Error fetching DSRC comments.' });
+    console.error("Error fetching DSRC comments:", error);
+    res.status(500).json({ message: "Error fetching DSRC comments." });
   }
 }
-
 
 export async function getUserComments(req, res) {
   try {
@@ -84,17 +89,21 @@ export async function getUserComments(req, res) {
     const limit = parseInt(req.query.limit) || 20;
 
     if (!userAddress) {
-      return res.status(400).json({ 
-        message: 'User address is required.' 
+      return res.status(400).json({
+        message: "User address is required.",
       });
     }
 
-    const commentsData = await Comment.getUserComments(userAddress, page, limit);
+    const commentsData = await Comment.getUserComments(
+      userAddress,
+      page,
+      limit
+    );
 
     const enrichedComments = await Promise.all(
       commentsData.comments.map(async (comment) => {
         const song = await Song.findOne({ dsrcId: comment.dsrcId })
-          .select('title description metadata walletAddress supportedChains')
+          .select("title description metadata walletAddress supportedChains")
           .lean();
 
         if (!song) {
@@ -108,13 +117,15 @@ export async function getUserComments(req, res) {
             description: song.description,
             metadata: song.metadata,
             creator: song.walletAddress,
-            supportedChains: song.supportedChains
-          }
+            supportedChains: song.supportedChains,
+          },
         };
       })
     );
 
-    const validComments = enrichedComments.filter(comment => comment !== null);
+    const validComments = enrichedComments.filter(
+      (comment) => comment !== null
+    );
 
     res.json({
       comments: validComments,
@@ -124,126 +135,131 @@ export async function getUserComments(req, res) {
         totalComments: commentsData.totalComments,
         itemsPerPage: commentsData.limit,
         hasNextPage: commentsData.page < commentsData.totalPages,
-        hasPrevPage: commentsData.page > 1
-      }
+        hasPrevPage: commentsData.page > 1,
+      },
     });
   } catch (error) {
-    console.error('Error fetching user comments:', error);
-    res.status(500).json({ message: 'Error fetching user comments.' });
+    console.error("Error fetching user comments:", error);
+    res.status(500).json({ message: "Error fetching user comments." });
   }
 }
 
-
 export async function getTopCommentedDSRCs(req, res) {
-    try {
-        const days = parseInt(req.query.days) || 7;
-        const limit = parseInt(req.query.limit) || 10;
+  try {
+    const days = parseInt(req.query.days) || 7;
+    const limit = parseInt(req.query.limit) || 10;
 
-        const topCommented = await Comment.getTopCommentedDSRCs(days, limit);
+    const topCommented = await Comment.getTopCommentedDSRCs(days, limit);
 
-        const enrichedResults = await Promise.all(
-            topCommented.map(async (item) => {
-                const song = await Song.findOne({ dsrcId: item.dsrcId })
-                    .select('title description metadata walletAddress supportedChains')
-                    .lean();
+    const enrichedResults = await Promise.all(
+      topCommented.map(async (item) => {
+        const song = await Song.findOne({ dsrcId: item.dsrcId })
+          .select(
+            "title description metadata walletAddress supportedChains hashTags id"
+          )
+          .lean();
 
-                if (!song) {
-                    return null;
-                }
+        if (!song) {
+          return null;
+        }
 
-                return {
-                    dsrcId: item.dsrcId,
-                    uniqueCommenters: item.uniqueCommentersCount,
-                    totalComments: item.totalComments,
-                    uploadHash: item.uploadHash,
-                    songDetails: {
-                        title: song.title,
-                        description: song.description,
-                        metadata: song.metadata,
-                        creator: song.walletAddress,
-                        supportedChains: song.supportedChains
-                    }
-                };
-            })
-        );
+        return {
+          dsrcId: item.dsrcId,
+          uniqueCommenters: item.uniqueCommentersCount,
+          totalComments: item.totalComments,
+          uploadHash: item.uploadHash,
+          songDetails: {
+            title: song.title,
+            description: song.description,
+            metadata: song.metadata,
+            creator: song.walletAddress,
+            supportedChains: song.supportedChains,
+            hashTags: song.hashTags,
+            _id: song._id,
+          },
+        };
+      })
+    );
 
-        const validResults = enrichedResults.filter(item => item !== null);
+    const validResults = enrichedResults.filter((item) => item !== null);
 
-        res.json({
-            timeframe: `${days} days`,
-            results: validResults
-        });
-    } catch (error) {
-        console.error('Error fetching top commented DSRCs:', error);
-        res.status(500).json({ message: 'Error fetching top commented DSRCs.' });
-    }
+    res.json({
+      timeframe: `${days} days`,
+      results: validResults,
+    });
+  } catch (error) {
+    console.error("Error fetching top commented DSRCs:", error);
+    res.status(500).json({ message: "Error fetching top commented DSRCs." });
+  }
 }
-
 
 export async function getDSRCCommentCount(req, res) {
   try {
     const { dsrcId } = req.params;
 
     if (!dsrcId) {
-      return res.status(400).json({ 
-        message: 'DSRC ID is required.' 
+      return res.status(400).json({
+        message: "DSRC ID is required.",
       });
     }
 
     const songExists = await Song.exists({ dsrcId });
     if (!songExists) {
-      return res.status(404).json({ message: 'DSRC not found.' });
+      return res.status(404).json({ message: "DSRC not found." });
     }
 
     const counts = await Comment.getDSRCCommentCount(dsrcId);
     res.json(counts);
   } catch (error) {
-    console.error('Error fetching DSRC comment count:', error);
-    res.status(500).json({ message: 'Error fetching DSRC comment count.' });
+    console.error("Error fetching DSRC comment count:", error);
+    res.status(500).json({ message: "Error fetching DSRC comment count." });
   }
 }
-
 
 export async function getMultipleDSRCCommentCounts(req, res) {
   try {
     const { dsrcIds } = req.body;
 
     if (!Array.isArray(dsrcIds) || dsrcIds.length === 0) {
-      return res.status(400).json({ 
-        message: 'Array of DSRC IDs is required.' 
+      return res.status(400).json({
+        message: "Array of DSRC IDs is required.",
       });
     }
 
     const existingDsrcs = await Song.find({ dsrcId: { $in: dsrcIds } })
-      .select('dsrcId')
+      .select("dsrcId")
       .lean();
 
-    const existingDsrcIds = existingDsrcs.map(song => song.dsrcId);
-    const nonExistingDsrcIds = dsrcIds.filter(id => !existingDsrcIds.includes(id));
+    const existingDsrcIds = existingDsrcs.map((song) => song.dsrcId);
+    const nonExistingDsrcIds = dsrcIds.filter(
+      (id) => !existingDsrcIds.includes(id)
+    );
 
     if (nonExistingDsrcIds.length > 0) {
-      return res.status(404).json({ 
-        message: 'Some DSRCs not found',
-        nonExistingDsrcIds 
+      return res.status(404).json({
+        message: "Some DSRCs not found",
+        nonExistingDsrcIds,
       });
     }
 
     const commentCounts = await Comment.getMultipleDSRCCommentCounts(dsrcIds);
     res.json({ commentCounts });
   } catch (error) {
-    console.error('Error fetching multiple DSRC comment counts:', error);
-    res.status(500).json({ message: 'Error fetching multiple DSRC comment counts.' });
+    console.error("Error fetching multiple DSRC comment counts:", error);
+    res
+      .status(500)
+      .json({ message: "Error fetching multiple DSRC comment counts." });
   }
 }
 
 export async function deleteComment(req, res) {
   try {
-    const userAddress = req.headers['x-user-address'];
+    const userAddress = req.headers["x-user-address"];
     const { commentId } = req.params;
 
     if (!userAddress || !commentId) {
-      return res.status(400).json({ 
-        message: 'User address and comment ID are required.' 
+      return res.status(400).json({
+        message: "User address and comment ID are required.",
       });
     }
 
@@ -252,29 +268,28 @@ export async function deleteComment(req, res) {
     const counts = await Comment.getDSRCCommentCount(deletedComment.dsrcId);
 
     res.json({
-      message: 'Comment deleted successfully.',
-      counts
+      message: "Comment deleted successfully.",
+      counts,
     });
   } catch (error) {
-    console.error('Error deleting comment:', error);
-    if (error.message === 'Comment not found') {
+    console.error("Error deleting comment:", error);
+    if (error.message === "Comment not found") {
       return res.status(404).json({ message: error.message });
     }
-    if (error.message === 'Unauthorized to delete this comment') {
+    if (error.message === "Unauthorized to delete this comment") {
       return res.status(403).json({ message: error.message });
     }
-    res.status(500).json({ message: 'Error deleting comment.' });
+    res.status(500).json({ message: "Error deleting comment." });
   }
 }
-
 
 export async function getUserCommentsCount(req, res) {
   try {
     const { userAddress } = req.params;
 
     if (!userAddress) {
-      return res.status(400).json({ 
-        message: 'User address is required.' 
+      return res.status(400).json({
+        message: "User address is required.",
       });
     }
 
@@ -282,7 +297,7 @@ export async function getUserCommentsCount(req, res) {
 
     res.json({ totalComments });
   } catch (error) {
-    console.error('Error fetching user comments count:', error);
-    res.status(500).json({ message: 'Error fetching user comments count.' });
+    console.error("Error fetching user comments count:", error);
+    res.status(500).json({ message: "Error fetching user comments count." });
   }
 }

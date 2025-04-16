@@ -80,7 +80,7 @@ router.get(
 router.post("/collections/:collectionId/tracks", verifyToken, addTracks);
 
 router.get(
-  "/collections/:collectionId/tracks/paginated",
+  "/collections/:collectionId/tracks",
   queryLimiter,
   getPaginatedTracks
 );
